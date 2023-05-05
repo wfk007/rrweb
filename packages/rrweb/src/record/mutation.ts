@@ -191,7 +191,7 @@ export default class MutationBuffer {
         : this.mirror.getId(n.parentNode);
       const nextId = getNextId(n);
       if (parentId === -1 || nextId === -1) {
-        return
+        return;
       }
       const meta = this.mirror.getMeta(n);
       if (meta) {
@@ -242,8 +242,8 @@ export default class MutationBuffer {
         onStylesheetLoad: (link, childSn) => {
           this.stylesheetManager.attachLinkElement(link, childSn);
         },
-      })
-    }
+      });
+    };
 
     while (this.mapRemoves.length) {
       this.mirror.removeNodeFromMap(this.mapRemoves.shift()!);
