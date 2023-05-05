@@ -32,96 +32,6 @@ import {
   getShadowHost,
 } from '../utils';
 
-type DoubleLinkedListNode = {
-  previous: DoubleLinkedListNode | null;
-  next: DoubleLinkedListNode | null;
-  value: NodeInLinkedList;
-};
-type NodeInLinkedList = Node & {
-  __ln: DoubleLinkedListNode;
-};
-
-function isNodeInLinkedList(n: Node | NodeInLinkedList): n is NodeInLinkedList {
-  return '__ln' in n;
-}
-
-class DoubleLinkedList {
-  public length = 0;
-  public head: DoubleLinkedListNode | null = null;
-
-  public get(position: number) {
-    if (position >= this.length) {
-      throw new Error('Position outside of list range');
-    }
-
-    let current = this.head;
-    for (let index = 0; index < position; index++) {
-      current = current?.next || null;
-    }
-    return current;
-  }
-
-  public addNode(n: Node) {
-    const node: DoubleLinkedListNode = {
-      value: n as NodeInLinkedList,
-      previous: null,
-      next: null,
-    };
-    (n as NodeInLinkedList).__ln = node;
-    if (n.previousSibling && isNodeInLinkedList(n.previousSibling)) {
-      const current = n.previousSibling.__ln.next;
-      node.next = current;
-      node.previous = n.previousSibling.__ln;
-      n.previousSibling.__ln.next = node;
-      if (current) {
-        current.previous = node;
-      }
-    } else if (
-      n.nextSibling &&
-      isNodeInLinkedList(n.nextSibling) &&
-      n.nextSibling.__ln.previous
-    ) {
-      const current = n.nextSibling.__ln.previous;
-      node.previous = current;
-      node.next = n.nextSibling.__ln;
-      n.nextSibling.__ln.previous = node;
-      if (current) {
-        current.next = node;
-      }
-    } else {
-      if (this.head) {
-        this.head.previous = node;
-      }
-      node.next = this.head;
-      this.head = node;
-    }
-    this.length++;
-  }
-
-  public removeNode(n: NodeInLinkedList) {
-    const current = n.__ln;
-    if (!this.head) {
-      return;
-    }
-
-    if (!current.previous) {
-      this.head = current.next;
-      if (this.head) {
-        this.head.previous = null;
-      }
-    } else {
-      current.previous.next = current.next;
-      if (current.next) {
-        current.next.previous = current.previous;
-      }
-    }
-    if (n.__ln) {
-      delete (n as Optional<NodeInLinkedList, '__ln'>).__ln;
-    }
-    this.length--;
-  }
-}
-
 const moveKey = (id: number, parentId: number) => `${id}@${parentId}`;
 
 /**
@@ -262,7 +172,7 @@ export default class MutationBuffer {
      * Sometimes child node may be pushed before its newly added
      * parent, so we init a queue to store these nodes.
      */
-    const addList = new DoubleLinkedList();
+    const addList: Node[] = [];
     const getNextId = (n: Node): number | null => {
       let ns: Node | null = n;
       let nextId: number | null = IGNORED_NODE; // slimDOM: ignored
@@ -281,9 +191,21 @@ export default class MutationBuffer {
         : this.mirror.getId(n.parentNode);
       const nextId = getNextId(n);
       if (parentId === -1 || nextId === -1) {
-        return addList.addNode(n);
+        return
       }
-      const sn = serializeNodeWithId(n, {
+      const meta = this.mirror.getMeta(n);
+      if (meta) {
+        adds.push({
+          parentId,
+          nextId,
+          node: meta,
+        });
+      }
+    };
+
+    const cacheAndSerialize = (n: Node) => {
+      addList.push(n);
+      serializeNodeWithId(n, {
         doc: this.doc,
         mirror: this.mirror,
         blockClass: this.blockClass,
@@ -320,15 +242,8 @@ export default class MutationBuffer {
         onStylesheetLoad: (link, childSn) => {
           this.stylesheetManager.attachLinkElement(link, childSn);
         },
-      });
-      if (sn) {
-        adds.push({
-          parentId,
-          nextId,
-          node: sn,
-        });
-      }
-    };
+      })
+    }
 
     while (this.mapRemoves.length) {
       this.mirror.removeNodeFromMap(this.mapRemoves.shift()!);
@@ -341,7 +256,7 @@ export default class MutationBuffer {
       ) {
         continue;
       }
-      pushAdd(n);
+      cacheAndSerialize(n);
     }
 
     for (const n of this.addedSet) {
@@ -349,73 +264,17 @@ export default class MutationBuffer {
         !isAncestorInSet(this.droppedSet, n) &&
         !isParentRemoved(this.removes, n, this.mirror)
       ) {
-        pushAdd(n);
+        cacheAndSerialize(n);
       } else if (isAncestorInSet(this.movedSet, n)) {
-        pushAdd(n);
+        cacheAndSerialize(n);
       } else {
         this.droppedSet.add(n);
       }
     }
 
-    let candidate: DoubleLinkedListNode | null = null;
-    while (addList.length) {
-      let node: DoubleLinkedListNode | null = null;
-      if (candidate) {
-        const parentId = this.mirror.getId(candidate.value.parentNode);
-        const nextId = getNextId(candidate.value);
-        if (parentId !== -1 && nextId !== -1) {
-          node = candidate;
-        }
-      }
-      if (!node) {
-        for (let index = addList.length - 1; index >= 0; index--) {
-          const _node = addList.get(index);
-          // ensure _node is defined before attempting to find value
-          if (_node) {
-            const parentId = this.mirror.getId(_node.value.parentNode);
-            const nextId = getNextId(_node.value);
-
-            if (nextId === -1) continue;
-            // nextId !== -1 && parentId !== -1
-            else if (parentId !== -1) {
-              node = _node;
-              break;
-            }
-            // nextId !== -1 && parentId === -1 This branch can happen if the node is the child of shadow root
-            else {
-              const unhandledNode = _node.value;
-              // If the node is the direct child of a shadow root, we treat the shadow host as its parent node.
-              if (
-                unhandledNode.parentNode &&
-                unhandledNode.parentNode.nodeType ===
-                  Node.DOCUMENT_FRAGMENT_NODE
-              ) {
-                const shadowHost = (unhandledNode.parentNode as ShadowRoot)
-                  .host;
-                const parentId = this.mirror.getId(shadowHost);
-                if (parentId !== -1) {
-                  node = _node;
-                  break;
-                }
-              }
-            }
-          }
-        }
-      }
-      if (!node) {
-        /**
-         * If all nodes in queue could not find a serialized parent,
-         * it may be a bug or corner case. We need to escape the
-         * dead while loop at once.
-         */
-        while (addList.head) {
-          addList.removeNode(addList.head.value);
-        }
-        break;
-      }
-      candidate = node.previous;
-      addList.removeNode(node.value);
-      pushAdd(node.value);
+    // 基于 addList 中已经序列化的节点，生成最终的上报结构
+    for (let i = 0; i < addList.length; i++) {
+      pushAdd(addList[i]);
     }
 
     const payload = {
